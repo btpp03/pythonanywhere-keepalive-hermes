@@ -1,0 +1,47 @@
+name: pa-keepalive
+
+# PythonAnywhere 免费版会回收控制台里的后台进程（setsid nohup 也拦不住），
+# 所以需要从外部定时登录 PA、把 bridge + nezha-agent 重新拉起来。
+# 本账号 GA 原生 schedule 常年不 fire → 真正的定时腿是 cron-job.org 每 10 分钟
+# POST /actions/workflows/<id>/dispatches，body: {"ref":"main","inputs":{"quiet":"true"}}
+on:
+  workflow_dispatch:
+    inputs:
+      quiet:
+        description: "静默：成功不推 TG（cron-job.org 外部腿用）"
+        type: boolean
+        default: false
+      mode:
+        description: "run=探测+自愈 / status=只探测不自愈"
+        type: choice
+        options: [run, status]
+        default: run
+  schedule:
+    - cron: "*/10 * * * *"
+
+concurrency:
+  group: pa-keepalive
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PA_USER: ${{ secrets.PA_USER }}
+      PA_PASS: ${{ secrets.PA_PASS }}
+      NZ_KEY: ${{ secrets.NZ_KEY }}
+      RELAY_HOST: ${{ secrets.RELAY_HOST }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      QUIET: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.quiet }}
+      MODE: ${{ github.event.inputs.mode || 'run' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: pip install -q requests websocket-client
+      - name: probe / heal
+        run: python3 pa_keepalive.py
