@@ -226,13 +226,23 @@ PROBE = [
 ]
 
 
-def probe(pa):
-    rc, out = pa.run("; ".join(PROBE))
-    m = re.search(r"HK ST BR=(\d+) AG=(\d+) PR=(\w*)", out)
-    if not m:
-        return None
-    return {"rc": rc, "br": int(m.group(1)), "ag": int(m.group(2)),
-            "pr": m.group(3) or "000"}
+def probe(pa, tries=3, gap=8):
+    """Run the probe, retrying when the console output can't be parsed.
+
+    A single unparsed read used to be reported as BR=0/AG=0/PR=000, which made a
+    healthy restart look like a failure (false alarm 2026-10-23). Unknown != down.
+    """
+    last = None
+    for i in range(tries):
+        rc, out = pa.run("; ".join(PROBE))
+        m = re.search(r"HK ST BR=(\d+) AG=(\d+) PR=(\w*)", out)
+        if m:
+            return {"rc": rc, "br": int(m.group(1)), "ag": int(m.group(2)),
+                    "pr": m.group(3) or "000"}
+        last = (rc, " ".join(out.split())[-120:])
+        log("[probe] unparsed (try %d/%d) rc=%s tail=%s" % (i + 1, tries, last[0], last[1]))
+        time.sleep(gap)
+    return None
 
 
 def main():
@@ -278,9 +288,18 @@ def main():
     rc, out = pa.run("NZKEY=%s bash $HOME/nz/start.sh 2>&1 | tail -4" % NZKEY)
     log("[restart] rc=%s %s" % (rc, " | ".join(out.split())[-160:]))
 
-    time.sleep(20)
-    st2 = probe(pa) or {"br": 0, "ag": 0, "pr": "000"}
+    # give the agent time to dial the panel through the bridge; poll instead of a
+    # single 20s sample (the panel handshake is not instant on a cold start)
+    st2 = None
+    for i in range(6):
+        time.sleep(15)
+        st2 = probe(pa, tries=1)
+        if st2 and st2["br"] >= 1 and st2["ag"] >= 1 and st2["pr"] == "200":
+            break
+        log("[reprobe] attempt %d: %s" % (i + 1, st2))
+    st2 = st2 or {"br": 0, "ag": 0, "pr": "000"}
     log("[reprobe] BR=%(br)s AG=%(ag)s PR=%(pr)s" % st2)
+
     healthy2 = st2["br"] >= 1 and st2["ag"] >= 1 and st2["pr"] == "200"
     healed = healthy2
     pa.close()
