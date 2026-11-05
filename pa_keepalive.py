@@ -12,7 +12,9 @@ local CONNECT bridge to the panel. All three must hold; otherwise it restarts
 `~/nz/start.sh` once and re-probes.
 
 Exit 0 = healthy (or healed).  Exit 1 = still broken (run goes red -> GitHub
-failure mail + one Telegram line).
+failure mail + one Telegram line). Failure TG alerts are de-duplicated: only the
+first failure of a consecutive streak pushes a line (previous run's conclusion
+is checked via the Actions API), so a persistently-broken link doesn't spam.
 
 Env:
   PA_USER, PA_PASS   PythonAnywhere credentials (secrets)
@@ -71,6 +73,60 @@ def notify(text):
             log("[tg] ok=%s" % (json.loads(r.read().decode()).get("ok")))
     except Exception as e:                  # noqa: BLE001
         log("[tg] failed: %r" % (e,))
+
+
+def prev_run_failed():
+    """Did the previous completed run of this workflow also fail?
+
+    A persistently-broken link (e.g. a stale ngrok host in RELAY_HOST) fails
+    every 10-minute tick; pushing one TG line per tick is spam. The FIRST
+    failure of a streak is enough — suppress the rest. GitHub marks a run as
+    failed only after the job ends, so while this run is executing the previous
+    completed run's conclusion is already available via the Actions API.
+
+    Returns True/False, or None when it cannot be determined (no GH context,
+    API error) — callers fail OPEN (still push) so a real outage is never
+    silently dropped. Needs `permissions: actions: read` + GITHUB_TOKEN.
+    """
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if not (token and repo and run_id):
+        log("[dedup] no GH context — cannot check previous run")
+        return None
+    hdr = {"Authorization": "Bearer " + token,
+           "Accept": "application/vnd.github+json", "User-Agent": UA}
+    try:
+        req = urllib.request.Request(
+            "%s/repos/%s/actions/runs/%s" % (api, repo, run_id), headers=hdr)
+        cur = json.load(urllib.request.urlopen(req, timeout=20))
+        wid = cur.get("workflow_id")
+        if not wid:
+            return None
+        req2 = urllib.request.Request(
+            "%s/repos/%s/actions/workflows/%s/runs?status=completed&per_page=5"
+            % (api, repo, wid), headers=hdr)
+        runs = json.load(urllib.request.urlopen(req2, timeout=20)).get("workflow_runs", [])
+        # this run is still in_progress, but filter defensively anyway
+        runs = [x for x in runs if str(x.get("id")) != str(run_id)]
+        if not runs:
+            log("[dedup] no previous completed run — first failure")
+            return False
+        prev = runs[0].get("conclusion")
+        log("[dedup] previous completed run conclusion=%s" % prev)
+        return prev == "failure"
+    except Exception as e:                  # noqa: BLE001
+        log("[dedup] lookup failed: %r (failing open)" % (e,))
+        return None
+
+
+def notify_failure(text):
+    """Push a failure line only on the FIRST failure of a consecutive streak."""
+    if prev_run_failed() is True:
+        log("[dedup] consecutive failure — suppressing duplicate TG alert")
+        return
+    notify(text)
 
 
 class PA:
@@ -309,8 +365,8 @@ def main():
                % (st["br"], st["ag"], st["pr"], st2["br"], st2["ag"], st2["pr"], REPO_URL))
         return 0
 
-    notify("❌ PythonAnywhere 哪吒探针重启失败\nBR=%s AG=%s PR=%s（探针/链路仍不通）\n检查 ngrok 地址是否变了、VPS relay 是否在跑\n%s"
-           % (st2["br"], st2["ag"], st2["pr"], REPO_URL))
+    notify_failure("❌ PythonAnywhere 哪吒探针重启失败\nBR=%s AG=%s PR=%s（探针/链路仍不通）\n检查 ngrok 地址是否变了、VPS relay 是否在跑\n%s"
+                   % (st2["br"], st2["ag"], st2["pr"], REPO_URL))
     return 1
 
 
@@ -319,5 +375,5 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as e:                  # noqa: BLE001
         log("[fatal] %r" % (e,))
-        notify("❌ PythonAnywhere 保活脚本异常：%s\n%s" % (repr(e)[:200], REPO_URL))
+        notify_failure("❌ PythonAnywhere 保活脚本异常：%s\n%s" % (repr(e)[:200], REPO_URL))
         sys.exit(1)

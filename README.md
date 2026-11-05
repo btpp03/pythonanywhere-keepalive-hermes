@@ -25,9 +25,12 @@ TLS 始终是 agent ↔ 面板端到端，中间只搬字节（gRPC 需要 h2 + 
 2. 复用 bash 控制台，走 SockJS/WebSocket 发命令
 3. 探三件事：`bridge.py` 在不在、`nezha-agent` 在不在、经本地桥对面板的 HTTPS 探测是否 200
 4. 任一不满足 → 跑 `NZKEY=*** bash ~/nz/start.sh`（幂等：先 pkill 再起），20 秒后复探
-5. 真掉过线才推 TG；健康空转完全静默；失败必推
+5. 真掉过线才推 TG；健康空转完全静默；**连续失败只推第一条失败告警**（去重）
 
 退出码：`0` 健康或已修复；`1` 仍不通 → run 变红，GitHub 失败邮件也是告警通道。
+**失败 TG 告警去重**：连续失败只推第一条（脚本查上一次已结束 run 的结论，靠 workflow 的
+`permissions: actions: read` + `GITHUB_TOKEN`）。地址漂移后每 10 分钟都失败的情况不会再刷屏；
+查不到上一次 run 时按「首条」处理，宁可多推也不漏报。
 
 ## 触发方式
 
