@@ -25,7 +25,6 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read          # for the failure-alert de-dup (previous run conclusion)
 
 jobs:
   keepalive:
@@ -40,10 +39,12 @@ jobs:
       TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       QUIET: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.quiet }}
       MODE: ${{ github.event.inputs.mode || 'run' }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - name: deps
         run: pip install -q requests websocket-client
       - name: probe / heal
+        # 探测失败不再把 run 标红 → GitHub 不再发 "Run failed" 邮件。
+        # 脚本自己会推 TG（已做节流）；run 恒绿，保活腿照常跑。
+        continue-on-error: true
         run: python3 pa_keepalive.py

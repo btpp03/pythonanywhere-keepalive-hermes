@@ -11,10 +11,10 @@ Health = bridge process + agent process + an end-to-end HTTPS probe through the
 local CONNECT bridge to the panel. All three must hold; otherwise it restarts
 `~/nz/start.sh` once and re-probes.
 
-Exit 0 = healthy (or healed).  Exit 1 = still broken (run goes red -> GitHub
-failure mail + one Telegram line). Failure TG alerts are de-duplicated: only the
-first failure of a consecutive streak pushes a line (previous run's conclusion
-is checked via the Actions API), so a persistently-broken link doesn't spam.
+Exit 0 = healthy (or healed).  Exit 1 = still broken (the workflow step is
+continue-on-error, so a broken link no longer makes GitHub send "Run failed"
+mail); the script itself pushes a throttled Telegram alert (at most twice an
+hour, on the :00 and :30 ticks) so a persistently-broken link doesn't spam.
 
 Env:
   PA_USER, PA_PASS   PythonAnywhere credentials (secrets)
@@ -75,56 +75,20 @@ def notify(text):
         log("[tg] failed: %r" % (e,))
 
 
-def prev_run_failed():
-    """Did the previous completed run of this workflow also fail?
-
-    A persistently-broken link (e.g. a stale ngrok host in RELAY_HOST) fails
-    every 10-minute tick; pushing one TG line per tick is spam. The FIRST
-    failure of a streak is enough — suppress the rest. GitHub marks a run as
-    failed only after the job ends, so while this run is executing the previous
-    completed run's conclusion is already available via the Actions API.
-
-    Returns True/False, or None when it cannot be determined (no GH context,
-    API error) — callers fail OPEN (still push) so a real outage is never
-    silently dropped. Needs `permissions: actions: read` + GITHUB_TOKEN.
-    """
-    token = os.environ.get("GITHUB_TOKEN", "")
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
-    api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
-    run_id = os.environ.get("GITHUB_RUN_ID", "")
-    if not (token and repo and run_id):
-        log("[dedup] no GH context — cannot check previous run")
-        return None
-    hdr = {"Authorization": "Bearer " + token,
-           "Accept": "application/vnd.github+json", "User-Agent": UA}
-    try:
-        req = urllib.request.Request(
-            "%s/repos/%s/actions/runs/%s" % (api, repo, run_id), headers=hdr)
-        cur = json.load(urllib.request.urlopen(req, timeout=20))
-        wid = cur.get("workflow_id")
-        if not wid:
-            return None
-        req2 = urllib.request.Request(
-            "%s/repos/%s/actions/workflows/%s/runs?status=completed&per_page=5"
-            % (api, repo, wid), headers=hdr)
-        runs = json.load(urllib.request.urlopen(req2, timeout=20)).get("workflow_runs", [])
-        # this run is still in_progress, but filter defensively anyway
-        runs = [x for x in runs if str(x.get("id")) != str(run_id)]
-        if not runs:
-            log("[dedup] no previous completed run — first failure")
-            return False
-        prev = runs[0].get("conclusion")
-        log("[dedup] previous completed run conclusion=%s" % prev)
-        return prev == "failure"
-    except Exception as e:                  # noqa: BLE001
-        log("[dedup] lookup failed: %r (failing open)" % (e,))
-        return None
-
-
 def notify_failure(text):
-    """Push a failure line only on the FIRST failure of a consecutive streak."""
-    if prev_run_failed() is True:
-        log("[dedup] consecutive failure — suppressing duplicate TG alert")
+    """Push a failure line, but at most twice an hour.
+
+    The cron leg ticks every 10 minutes; a persistently-broken link (stale
+    ngrok host, dead VPS relay) would otherwise push one TG line per tick.
+    GitHub's "Run failed" mail is gone now (the step is continue-on-error), so
+    we can no longer use the previous run's conclusion for de-dup — this
+    stateless time window replaces it. Fires on the :00 and :30 ticks only
+    (minute % 30 < 10); worst-case delay before the first alert is ~20 min.
+    Healthy / healed notices are untouched.
+    """
+    minute = int(time.strftime("%M"))
+    if minute % 30 >= 10:
+        log("[dedup] failure TG throttled (utc minute=%d, only :00/:30 ticks push)" % minute)
         return
     notify(text)
 
